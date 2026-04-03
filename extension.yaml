@@ -1,0 +1,10 @@
+Id: d9e27c94-eba8-46f1-b4ea-6c444cc0500e
+Name: Dune Save Sync
+Author: Antigravity
+Version: 1.0.0
+Module: DunePlayniteAddon.dll
+Type: GenericPlugin
+Icon: icon.png
+Links:
+  - Name: GitHub
+    Url: https://github.com/your-repo/dune
