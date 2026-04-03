@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Controls;
 using Playnite.SDK;
 using Playnite.SDK.Events;
 using Playnite.SDK.Models;
@@ -10,38 +9,47 @@ using Playnite.SDK.Plugins;
 
 namespace DunePlayniteAddon
 {
-    public class DunePlugin : GenericPlugin
+    public class DunePlugin : GenericPlugin, IDisposable
     {
         private static readonly ILogger logger = LogManager.GetLogger();
         private DuneSettingsViewModel settings;
         private DuneScanner scanner;
-        private DuneApiClient apiClient;
+
+        // Used to cancel in-flight syncs on plugin shutdown.
+        private CancellationTokenSource _cts = new CancellationTokenSource();
 
         public override Guid Id { get; } = Guid.Parse("d9e27c94-eba8-46f1-b4ea-6c444cc0500e");
+
+        // Always construct from current settings so URL changes take effect immediately
+        // without requiring a Playnite restart. DuneApiClient is cheap to construct
+        // since HttpClient is a static singleton inside it.
+        private DuneApiClient ApiClient => new DuneApiClient(settings.Settings.ServerUrl);
 
         public DunePlugin(IPlayniteAPI api) : base(api)
         {
             settings = new DuneSettingsViewModel(this);
             scanner = new DuneScanner();
-            Properties = new GenericPluginProperties
-            {
-                HasSettings = true
-            };
+            Properties = new GenericPluginProperties { HasSettings = true };
         }
 
-        public override ISettings GetSettings(bool firstRunSettings)
-        {
-            return settings;
-        }
+        public override ISettings GetSettings(bool firstRunSettings) => settings;
 
         public override void OnApplicationStarted(OnApplicationStartedEventArgs args)
         {
-            apiClient = new DuneApiClient(settings.Settings.ServerUrl);
+            logger.Info($"[Dune] Plugin started. Server: {settings.Settings.ServerUrl}");
         }
 
+        /// <summary>
+        /// Pulls the latest saves from the server before the game launches.
+        /// Only active when SyncOnGameStart is enabled. Runs silently — does
+        /// not block or cancel the launch on failure.
+        /// </summary>
         public override void OnGameStarting(OnGameStartingEventArgs args)
         {
-            // Optional: Pull saves before starting game
+            if (settings.Settings.SyncOnGameStart)
+            {
+                _ = PullSavesAsync(args.Game);
+            }
         }
 
         public override void OnGameStopped(OnGameStoppedEventArgs args)
@@ -58,29 +66,35 @@ namespace DunePlayniteAddon
             if (string.IsNullOrEmpty(savePath))
             {
                 PlayniteApi.Notifications.Add(new NotificationMessage(
-                    "dune-save-not-found",
-                    $"Dune: Could not automatically detect save path for {game.Name}. Please map it in the Dune client.",
-                    NotificationType.Error
-                ));
+                    // Unique per-game ID prevents collisions when multiple games sync concurrently.
+                    $"dune-no-path-{game.Id}",
+                    $"Dune: Could not auto-detect save path for \"{game.Name}\". Please map it in the Dune client.",
+                    NotificationType.Error));
                 return;
             }
 
-            bool success = await apiClient.UploadSaves(game.Name, savePath);
+            bool success = await ApiClient.UploadSaves(game.Name, savePath, _cts.Token);
+
+            PlayniteApi.Notifications.Add(new NotificationMessage(
+                $"dune-upload-{game.Id}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}",
+                success
+                    ? $"Dune: Saves synced for \"{game.Name}\"! ✓"
+                    : $"Dune: Failed to sync saves for \"{game.Name}\". Check server connection.",
+                success ? NotificationType.Info : NotificationType.Error));
+        }
+
+        private async Task PullSavesAsync(Game game)
+        {
+            string savePath = scanner.FindSavePathForGame(game);
+            if (string.IsNullOrEmpty(savePath)) return; // Silent — don't block game launch
+
+            bool success = await ApiClient.DownloadSaves(game.Name, savePath, _cts.Token);
             if (success)
             {
                 PlayniteApi.Notifications.Add(new NotificationMessage(
-                    "dune-sync-success",
-                    $"Dune: Successfully synced saves for {game.Name}!",
-                    NotificationType.Info
-                ));
-            }
-            else
-            {
-                PlayniteApi.Notifications.Add(new NotificationMessage(
-                    "dune-sync-failed",
-                    $"Dune: Failed to sync saves for {game.Name}. Check server connection.",
-                    NotificationType.Error
-                ));
+                    $"dune-pull-{game.Id}",
+                    $"Dune: Latest saves restored for \"{game.Name}\" before launch.",
+                    NotificationType.Info));
             }
         }
 
@@ -92,35 +106,40 @@ namespace DunePlayniteAddon
                 {
                     MenuSection = "Dune Sync",
                     Description = "Push Saves to Server",
-                    Action = (mainArgs) => {
-                        _ = SyncSavesAsync(mainArgs.Games[0]);
-                    }
+                    Action = (mainArgs) => { _ = SyncSavesAsync(mainArgs.Games[0]); }
                 },
                 new GameMenuItem
                 {
                     MenuSection = "Dune Sync",
                     Description = "Pull Saves from Server",
-                    Action = async (mainArgs) => {
+                    Action = async (mainArgs) =>
+                    {
                         var game = mainArgs.Games[0];
                         string savePath = scanner.FindSavePathForGame(game);
                         if (string.IsNullOrEmpty(savePath))
                         {
-                            PlayniteApi.Dialogs.ShowErrorMessage($"Could not find save path for {game.Name}.");
+                            PlayniteApi.Dialogs.ShowErrorMessage(
+                                $"Could not find save path for \"{game.Name}\".",
+                                "Dune Sync");
                             return;
                         }
 
-                        bool success = await apiClient.DownloadSaves(game.Name, savePath);
+                        bool success = await ApiClient.DownloadSaves(game.Name, savePath, _cts.Token);
                         if (success)
-                        {
-                            PlayniteApi.Dialogs.ShowInfo($"Successfully restored saves for {game.Name}!");
-                        }
+                            PlayniteApi.Dialogs.ShowMessage($"Saves restored for \"{game.Name}\".", "Dune Sync");
                         else
-                        {
-                            PlayniteApi.Dialogs.ShowErrorMessage($"Failed to restore saves for {game.Name}.");
-                        }
+                            PlayniteApi.Dialogs.ShowErrorMessage(
+                                $"Failed to restore saves for \"{game.Name}\".", "Dune Sync");
                     }
                 }
             };
+        }
+
+        public void Dispose()
+        {
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _cts = null;
         }
     }
 }

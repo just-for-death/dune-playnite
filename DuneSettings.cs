@@ -7,7 +7,8 @@ namespace DunePlayniteAddon
 {
     public class DuneSettings : ObservableObject
     {
-        private string serverUrl = "http://localhost:3010";
+        // Bug fix: default was 3010 — server runs on 3030.
+        private string serverUrl = "http://localhost:3030";
         public string ServerUrl
         {
             get => serverUrl;
@@ -19,6 +20,14 @@ namespace DunePlayniteAddon
         {
             get => autoSyncOnClose;
             set => SetValue(ref autoSyncOnClose, value);
+        }
+
+        // New: pull saves from server before launching a game (restore-on-start).
+        private bool syncOnGameStart = false;
+        public bool SyncOnGameStart
+        {
+            get => syncOnGameStart;
+            set => SetValue(ref syncOnGameStart, value);
         }
     }
 
@@ -33,15 +42,8 @@ namespace DunePlayniteAddon
         {
             this.plugin = plugin;
             var savedSettings = plugin.LoadPluginSettings<DuneSettings>();
-
-            if (savedSettings != null)
-            {
-                Settings = savedSettings;
-            }
-            else
-            {
-                Settings = new DuneSettings();
-            }
+            // Simplified null-coalescing instead of verbose if/else
+            Settings = savedSettings ?? new DuneSettings();
         }
 
         public void BeginEdit()
@@ -62,6 +64,20 @@ namespace DunePlayniteAddon
         public bool VerifySettings(out List<string> errors)
         {
             errors = new List<string>();
+
+            if (string.IsNullOrWhiteSpace(Settings.ServerUrl))
+            {
+                errors.Add("Server URL cannot be empty.");
+                return false;
+            }
+
+            if (!Uri.TryCreate(Settings.ServerUrl, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                errors.Add($"'{Settings.ServerUrl}' is not a valid HTTP/HTTPS URL.");
+                return false;
+            }
+
             return true;
         }
     }
