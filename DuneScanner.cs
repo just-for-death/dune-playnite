@@ -21,9 +21,14 @@ namespace DunePlayniteAddon
         /// </summary>
         public string ExpandPath(string template)
         {
-            if (string.IsNullOrEmpty(template)) return string.Empty;
+            if (string.IsNullOrWhiteSpace(template)) return string.Empty;
 
-            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string home = string.Empty;
+            try
+            {
+                home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            }
+            catch { /* ignore — fallback to relative if somehow inaccessible */ }
 
             var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -44,8 +49,16 @@ namespace DunePlayniteAddon
                 expanded = expanded.Replace(r.Key, r.Value);
 
             // Handle %USERPROFILE% / %APPDATA% etc.
-            expanded = Environment.ExpandEnvironmentVariables(expanded);
-            return Path.GetFullPath(expanded);
+            try
+            {
+                expanded = Environment.ExpandEnvironmentVariables(expanded);
+                return Path.GetFullPath(expanded);
+            }
+            catch (Exception ex)
+            {
+                // Return original template if expansion/normalization fails, don't crash
+                return template;
+            }
         }
 
         /// <summary>
@@ -54,9 +67,14 @@ namespace DunePlayniteAddon
         /// </summary>
         public string FindSavePathForGame(Game game)
         {
+            if (game == null) return null;
+
             // Return cached result (re-verify it still exists)
             if (_pathCache.TryGetValue(game.Id, out string cached) && Directory.Exists(cached))
                 return cached;
+
+            // Sanitize game name to avoid illegal path characters (e.g. :, ?, *)
+            string safeName = string.Join("_", game.Name.Split(Path.GetInvalidFileNameChars()));
 
             string[] searchRoots =
             {
@@ -71,26 +89,53 @@ namespace DunePlayniteAddon
                 if (!Directory.Exists(root)) continue;
 
                 // 1. Exact name match: Documents/GameName
-                string candidate = Path.Combine(root, game.Name);
+                string candidate = Path.Combine(root, safeName);
                 if (Directory.Exists(candidate))
                     return Cache(game.Id, candidate);
 
                 // 2. Common "Saves" suffix: Documents/GameName Saves
-                candidate = Path.Combine(root, game.Name + " Saves");
+                candidate = Path.Combine(root, safeName + " Saves");
                 if (Directory.Exists(candidate))
                     return Cache(game.Id, candidate);
 
                 // 3. One level of nesting: Documents/Publisher/GameName
                 try
                 {
-                    foreach (var sub in Directory.GetDirectories(root))
+                    // PERFORMANCE: Only check immediate subdirectories to avoid deep-traversal hangs
+                    foreach (var sub in Directory.GetDirectories(root, "*", SearchOption.TopDirectoryOnly))
                     {
-                        string nested = Path.Combine(sub, game.Name);
+                        string nested = Path.Combine(sub, safeName);
                         if (Directory.Exists(nested))
                             return Cache(game.Id, nested);
                     }
                 }
                 catch { /* skip protected directories */ }
+            }
+
+            // 4. Check Install Directory for common portable / emulator save folders
+            if (!string.IsNullOrWhiteSpace(game.InstallDirectory) && Directory.Exists(game.InstallDirectory))
+            {
+                string[] commonSaveFolders = { "Saves", "Save", "savedata", "userdata", "profile" };
+                
+                var directoriesToCheck = new List<string> { game.InstallDirectory };
+                try
+                {
+                    foreach (var sub in Directory.GetDirectories(game.InstallDirectory, "bin*", SearchOption.TopDirectoryOnly))
+                    {
+                        directoriesToCheck.Add(sub);
+                    }
+                }
+                catch { /* skip protected directories */ }
+
+                foreach (var dir in directoriesToCheck)
+                {
+                    foreach (var folder in commonSaveFolders)
+                    {
+                        string candidate = Path.Combine(dir, folder);
+                        if (Directory.Exists(candidate))
+                            return Cache(game.Id, candidate);
+                    }
+                }
             }
 
             return null;

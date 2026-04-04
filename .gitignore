@@ -1,0 +1,1 @@
+bin/\nobj/\n*.exe\n*.pdb\n*.txt\n*.cache\n*.json\n*.dgspec.json\n*.g.props\n*.g.targets\n*.nuget.cache

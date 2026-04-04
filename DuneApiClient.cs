@@ -70,15 +70,16 @@ namespace DunePlayniteAddon
                             DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString());
                         request.Content = streamContent;
 
-                        var response = await client.SendAsync(request, cancellationToken)
-                            .ConfigureAwait(false);
-
-                        if (!response.IsSuccessStatusCode)
+                        using (var response = await client.SendAsync(request, cancellationToken)
+                            .ConfigureAwait(false))
                         {
-                            string error = await response.Content.ReadAsStringAsync()
-                                .ConfigureAwait(false);
-                            logger.Error($"[Dune] Server rejected upload for '{gameName}': {error}");
-                            return false;
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                string error = await response.Content.ReadAsStringAsync()
+                                    .ConfigureAwait(false);
+                                logger.Error($"[Dune] Server rejected upload for '{gameName}': {error}");
+                                return false;
+                            }
                         }
                     }
 
@@ -116,21 +117,24 @@ namespace DunePlayniteAddon
             {
                 logger.Info($"[Dune] Downloading saves for '{gameName}' to '{localPath}'");
 
-                var response = await client.GetAsync(
+                using (var response = await client.GetAsync(
                     $"{baseUrl}/api/download-file?game={Uri.EscapeDataString(gameName)}&path=saves.zip",
-                    cancellationToken).ConfigureAwait(false);
-
-                if (!response.IsSuccessStatusCode)
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken).ConfigureAwait(false))
                 {
-                    logger.Error($"[Dune] Server returned {(int)response.StatusCode} for download of '{gameName}'.");
-                    return false;
-                }
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        logger.Error($"[Dune] Server returned {(int)response.StatusCode} for download of '{gameName}'.");
+                        return false;
+                    }
 
-                byte[] data = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
-                string zipPath = Path.Combine(Path.GetTempPath(), $"dune_{Guid.NewGuid():N}.zip");
-                try
-                {
-                    File.WriteAllBytes(zipPath, data);
+                    string zipPath = Path.Combine(Path.GetTempPath(), $"dune_{Guid.NewGuid():N}.zip");
+                    try
+                    {
+                        using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            await response.Content.CopyToAsync(fs).ConfigureAwait(false);
+                        }
 
                     if (!Directory.Exists(localPath))
                         Directory.CreateDirectory(localPath);
@@ -143,7 +147,13 @@ namespace DunePlayniteAddon
                         {
                             if (string.IsNullOrEmpty(entry.Name)) continue; // skip directories
                             string destinationPath = Path.GetFullPath(Path.Combine(localPath, entry.FullName));
-                            if (destinationPath.StartsWith(Path.GetFullPath(localPath), StringComparison.OrdinalIgnoreCase))
+                            string rootFullPath = Path.GetFullPath(localPath);
+                            if (!rootFullPath.EndsWith(Path.DirectorySeparatorChar.ToString()) && !rootFullPath.EndsWith(Path.AltDirectorySeparatorChar.ToString()))
+                            {
+                                rootFullPath += Path.DirectorySeparatorChar;
+                            }
+                            
+                            if (destinationPath.StartsWith(rootFullPath, StringComparison.OrdinalIgnoreCase))
                             {
                                 Directory.CreateDirectory(Path.GetDirectoryName(destinationPath));
                                 entry.ExtractToFile(destinationPath, overwrite: true);
@@ -158,6 +168,7 @@ namespace DunePlayniteAddon
                 {
                     try { if (File.Exists(zipPath)) File.Delete(zipPath); } catch { }
                 }
+                } // End of using(var response...)
             }
             catch (OperationCanceledException)
             {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Playnite.SDK;
 using Playnite.SDK.Data;
+using Playnite.SDK.Plugins;
 
 namespace DunePlayniteAddon
 {
@@ -11,7 +12,7 @@ namespace DunePlayniteAddon
         private string serverUrl = "http://localhost:3030";
         public string ServerUrl
         {
-            get => serverUrl;
+            get => serverUrl ?? "http://localhost:3030";
             set => SetValue(ref serverUrl, value);
         }
 
@@ -29,6 +30,14 @@ namespace DunePlayniteAddon
             get => syncOnGameStart;
             set => SetValue(ref syncOnGameStart, value);
         }
+
+        // New: Dual-Boot / Offline Mode. Disables sync in Windows if syncing using local Linux dune-server.
+        private bool offlineMode = false;
+        public bool OfflineMode
+        {
+            get => offlineMode;
+            set => SetValue(ref offlineMode, value);
+        }
     }
 
     public class DuneSettingsViewModel : ObservableObject, ISettings
@@ -41,9 +50,17 @@ namespace DunePlayniteAddon
         public DuneSettingsViewModel(GenericPlugin plugin)
         {
             this.plugin = plugin;
-            var savedSettings = plugin.LoadPluginSettings<DuneSettings>();
-            // Simplified null-coalescing instead of verbose if/else
-            Settings = savedSettings ?? new DuneSettings();
+            try
+            {
+                var savedSettings = plugin.LoadPluginSettings<DuneSettings>();
+                Settings = savedSettings ?? new DuneSettings();
+            }
+            catch (Exception ex)
+            {
+                // Log and fallback to defaults if settings file is corrupted
+                LogManager.GetLogger().Error(ex, "Failed to load Dune settings.");
+                Settings = new DuneSettings();
+            }
         }
 
         public void BeginEdit()

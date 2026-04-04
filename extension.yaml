@@ -4,7 +4,6 @@ Author: Yashwin
 Version: 1.0.0
 Module: DunePlayniteAddon.dll
 Type: GenericPlugin
-Icon: icon.png
 Links:
   - Name: GitHub
     Url: https://github.com/just-for-death/dune-playnite
